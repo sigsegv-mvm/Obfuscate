@@ -28,6 +28,9 @@ std::cout << obfuscated_string << std::endl;
 ----------------------------------------------------------------------------- */
 
 #pragma once
+
+#include <mutex>
+
 #if __cplusplus >= 202002L
 	#define AY_CONSTEVAL consteval
 #else
@@ -148,7 +151,8 @@ namespace ay
 		CHAR_TYPE m_data[N]{};
 	};
 
-	// Handles decryption and re-encryption of an encrypted string at runtime
+	// Handles decryption of an encrypted string at runtime (decryption occurs
+	// upon first access and re-encryption is disallowed)
 	template <size_type N, key_type KEY, typename CHAR_TYPE = char>
 	class obfuscated_data
 	{
@@ -171,48 +175,23 @@ namespace ay
 			}
 		}
 
-		// Returns a pointer to the plain text string, decrypting it if
-		// necessary
+		// Returns a pointer to the plain text string, decrypting it if this is
+		// the first access
 		operator CHAR_TYPE* ()
 		{
-			decrypt();
+			// Decrypt the data once and ONLY once, and in a thread-safe manner
+			call_once(m_flag, [&m_data]() -> { cipher(m_data, N, KEY); });
+
 			return m_data;
-		}
-
-		// Manually decrypt the string
-		void decrypt()
-		{
-			if (m_encrypted)
-			{
-				cipher(m_data, N, KEY);
-				m_encrypted = false;
-			}
-		}
-
-		// Manually re-encrypt the string
-		void encrypt()
-		{
-			if (!m_encrypted)
-			{
-				cipher(m_data, N, KEY);
-				m_encrypted = true;
-			}
-		}
-
-		// Returns true if this string is currently encrypted, false otherwise.
-		bool is_encrypted() const
-		{
-			return m_encrypted;
 		}
 
 	private:
 
-		// Local storage for the string. Call is_encrypted() to check whether or
-		// not the string is currently obfuscated.
-		CHAR_TYPE m_data[N];
+		// Flag used for thread-safely doing one-time decryption on first access
+		std::once_flag m_flag;
 
-		// Whether data is currently encrypted
-		bool m_encrypted{ true };
+		// Local storage for the string
+		CHAR_TYPE m_data[N];
 	};
 
 	// This function exists purely to extract the number of elements 'N' in the
@@ -240,7 +219,7 @@ namespace ay
 		using char_type = ay::char_type<decltype(*data)>; \
 		constexpr auto n = sizeof(data)/sizeof(data[0]); \
 		constexpr auto obfuscator = ay::make_obfuscator<n, key, char_type>(data); \
-		thread_local auto obfuscated_data = ay::obfuscated_data<n, key, char_type>(obfuscator); \
+		static auto obfuscated_data = ay::obfuscated_data<n, key, char_type>(obfuscator); \
 		return obfuscated_data; \
 	}()
 

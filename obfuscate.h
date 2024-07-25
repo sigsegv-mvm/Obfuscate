@@ -28,6 +28,10 @@ std::cout << obfuscated_string << std::endl;
 ----------------------------------------------------------------------------- */
 
 #pragma once
+
+#include <mutex>
+#include <shared_mutex>
+
 #if __cplusplus >= 202002L
 	#define AY_CONSTEVAL consteval
 #else
@@ -155,6 +159,11 @@ namespace ay
 	public:
 		obfuscated_data(const obfuscator<N, KEY, CHAR_TYPE>& obfuscator)
 		{
+			// Holding the wlock probably isn't necessary, since we're only ever
+			// initialized as a function-local static, and that is intrinsically
+			// done in a thread-safe manner
+			std::unique_lock(m_mutex);
+
 			// Copy obfuscated data
 			for (size_type i = 0; i < N; i++)
 			{
@@ -164,6 +173,12 @@ namespace ay
 
 		~obfuscated_data()
 		{
+			// Holding the wlock shouldn't be necessary, since we've only ever
+			// initialized as a function-local static, and in that situation the
+			// destructor is registered with __cxa_atexit to be called when
+			// either the current shared library unloads or the program exits
+			std::uniqe_lock(m_mutex);
+
 			// Zero m_data to remove it from memory
 			for (size_type i = 0; i < N; i++)
 			{
@@ -175,37 +190,80 @@ namespace ay
 		// necessary
 		operator CHAR_TYPE* ()
 		{
-			decrypt();
+			// Ideally, we'd hold rlock for the main body of the function, and
+			// upgrade to a wlock just for the conditional body of the if block
+			std::unique_lock wlock(m_mutex);
+
+			// We don't just call into decrypt() because we want to hold the
+			// lock continuously/atomically, and because C++ does not provide
+			// for a recursive shared mutex
+			if (m_encrypted)
+			{
+				crypt();
+			}
 			return m_data;
 		}
 
 		// Manually decrypt the string
 		void decrypt()
 		{
+			// Ideally, we'd hold rlock for the main body of the function, and
+			// upgrade to a wlock just for the conditional body of the if block
+			std::unique_lock wlock(m_mutex);
+
 			if (m_encrypted)
 			{
-				cipher(m_data, N, KEY);
-				m_encrypted = false;
+				crypt();
 			}
 		}
 
 		// Manually re-encrypt the string
 		void encrypt()
 		{
+			// Ideally, we'd hold rlock for the main body of the function, and
+			// upgrade to a wlock just for the conditional body of the if block
+			std::unique_lock wlock(m_mutex);
+
 			if (!m_encrypted)
 			{
-				cipher(m_data, N, KEY);
-				m_encrypted = true;
+				crypt();
 			}
 		}
 
 		// Returns true if this string is currently encrypted, false otherwise.
 		bool is_encrypted() const
 		{
+			std::shared_lock rlock(m_mutex);
+
 			return m_encrypted;
 		}
 
+	protected:
+		// Internal: Encrypt/decrypt the data (the use of a symmetrical cipher
+		// means these are the same actual operation)
+		//
+		// CALLER PRECONDITIONS:
+		// - checked m_encrypted to decide whether (en|de)cryption is needed
+		// - acquired wlock on m_mutex
+		void crypt()
+		{
+			cipher(m_data, N, KEY);
+			m_encrypted = !m_encrypted;
+		}
+
 	private:
+
+		// Ensure thread-safety WITHIN calls. Not necessarily ACROSS calls!
+		// (If one thread gets the decrypted ptr to m_data, and then another
+		// thread calls encrypt(), and then the first thread actually uses the
+		// supposedly-decrypted character data... not good.)
+		//
+		// Note that, in several cases, we'd ideally like to be able to hold an
+		// rlock on the mutex, and only upgrade to wlock if we realize we really
+		// do need to e.g. decrypt/encrypt the data; but unfortunately, C++ does
+		// not provide a means to ATOMICALLY upgrade from rlock to wlock, and so
+		// as a result we end up holding wlock more than we'd really prefer to.
+		std::shared_mutex m_mutex;
 
 		// Local storage for the string. Call is_encrypted() to check whether or
 		// not the string is currently obfuscated.
@@ -240,7 +298,7 @@ namespace ay
 		using char_type = ay::char_type<decltype(*data)>; \
 		constexpr auto n = sizeof(data)/sizeof(data[0]); \
 		constexpr auto obfuscator = ay::make_obfuscator<n, key, char_type>(data); \
-		thread_local auto obfuscated_data = ay::obfuscated_data<n, key, char_type>(obfuscator); \
+		static auto obfuscated_data = ay::obfuscated_data<n, key, char_type>(obfuscator); \
 		return obfuscated_data; \
 	}()
 
